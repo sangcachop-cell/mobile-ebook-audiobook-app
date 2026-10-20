@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 import 'welcome_screen.dart';
 import 'login_screen.dart';
 
-void main() {
+import 'api_config.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await ApiConfig.init();
   runApp(const BookApp());
 }
 
@@ -22,7 +26,8 @@ class BookApp extends StatelessWidget {
       initialRoute: '/welcome',
       routes: {
         '/welcome': (context) => const WelcomeScreen(),
-        '/login': (context) => const AuthScreen(),
+        '/login': (context) => const AuthScreen(initialIsLogin: true),
+        '/register': (context) => const AuthScreen(initialIsLogin: false),
       },
     );
   }

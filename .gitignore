@@ -43,3 +43,16 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+android/build/
+.gradle/
+**/android/.gradle/
+
+# Python related
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Agent and temporary documentation notes
+tien_do_du_an.md
+t_i_li_u_cho_coding_agent.md
+k_ho_ch_th_c_hi_n_n.md

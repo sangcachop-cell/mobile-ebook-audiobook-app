@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'api_config.dart';
 
 class AdminBookManager extends StatefulWidget {
   final String username;
@@ -27,7 +28,7 @@ class _AdminBookManagerState extends State<AdminBookManager> {
   Future<void> _fetchBooks() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
-    final url = Uri.parse('http://10.0.2.2:8000/api/shop-books');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/shop-books');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -71,7 +72,7 @@ class _AdminBookManagerState extends State<AdminBookManager> {
 
     if (confirm != true) return;
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/shop-books/$rawBookId');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/shop-books/$rawBookId');
     try {
       final response = await http.delete(url);
       if (response.statusCode == 200) {
@@ -145,7 +146,7 @@ class _AdminBookManagerState extends State<AdminBookManager> {
                 return;
               }
 
-              final url = Uri.parse('http://10.0.2.2:8000/api/shop-books');
+              final url = Uri.parse('${ApiConfig.baseUrl}/api/shop-books');
               final req = http.MultipartRequest('POST', url);
 
               req.fields['title'] = titleCtrl.text.trim();
@@ -153,6 +154,8 @@ class _AdminBookManagerState extends State<AdminBookManager> {
               req.fields['price'] = priceCtrl.text.trim();
               req.fields['description'] = descCtrl.text.trim();
               req.files.add(await http.MultipartFile.fromPath('file', selectedImg!.path));
+
+              if (!context.mounted) return;
 
               try {
                 showDialog(
@@ -310,9 +313,8 @@ class _AdminBookManagerState extends State<AdminBookManager> {
 
           final dynamic bookId = book['id'];
 
-          // Chuyển đổi localhost sang IP máy ảo Android để không lỗi hiển thị ảnh
           String rawImgUrl = book['image_path'] ?? book['image_url'] ?? '';
-          String correctedImgUrl = rawImgUrl.replaceAll('localhost', '10.0.2.2');
+          String correctedImgUrl = ApiConfig.formatUrl(rawImgUrl);
 
           // Ép kiểu giá tiền an toàn chống lỗi định dạng số nguyên/số thực
           final num rawPrice = book['price'] ?? 0;

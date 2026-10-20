@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:ui'; // Thư viện bắt buộc để xử lý hiệu ứng làm mờ ImageFilter
+import 'api_config.dart';
+import 'admin_online_books_screen.dart';
 
 class BookManagementScreen extends StatefulWidget {
   const BookManagementScreen({super.key});
@@ -14,6 +16,8 @@ class BookManagementScreen extends StatefulWidget {
 class _BookManagementScreenState extends State<BookManagementScreen> {
   List<dynamic> _books = [];
   bool _isLoading = true;
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
 
   @override
   void initState() {
@@ -21,12 +25,18 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
     _fetchBooks();
   }
 
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
   // Lấy toàn bộ danh sách sách từ backend hệ thống
   Future<void> _fetchBooks() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/books');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/books');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -57,7 +67,7 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
       });
     }
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/books/$bookId');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/books/$bookId');
     try {
       final response = await http.delete(url);
       if (response.statusCode == 200 || response.statusCode == 204) {
@@ -138,8 +148,17 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Giải quyết triệt để dấu ! ở các biến màu palette
     final containerBgColor = Colors.grey[900] ?? const Color(0xFF121212);
+
+    final filteredBooks = _searchQuery.isEmpty
+        ? _books
+        : _books.where((b) {
+            final t = (b['title'] ?? '').toString().toLowerCase();
+            final a = (b['author'] ?? '').toString().toLowerCase();
+            final c = (b['category'] ?? '').toString().toLowerCase();
+            final q = _searchQuery.toLowerCase();
+            return t.contains(q) || a.contains(q) || c.contains(q);
+          }).toList();
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -154,6 +173,16 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
         centerTitle: true,
         foregroundColor: Colors.white,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.cloud_download_rounded, color: Colors.tealAccent, size: 24),
+            tooltip: "Tải sách từ nguồn mở (Gutenberg / LibriVox)",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const AdminOnlineBooksScreen(adminUsername: "admin")),
+              ).then((_) => _fetchBooks());
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh_rounded, size: 24),
             tooltip: "Làm mới kho sách",
@@ -181,44 +210,101 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
           SafeArea(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator(color: Colors.orange))
-                : _books.isEmpty
-                ? Center(
-              child: Container(
-                padding: const EdgeInsets.all(24),
-                margin: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: containerBgColor.withOpacity(0.8),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.library_books_rounded, color: Colors.white.withOpacity(0.3), size: 54),
-                    const SizedBox(height: 16),
-                    const Text(
-                      "Thư viện trống không!\nHãy thêm sách mới bằng nút Admin nhé.",
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white54, fontSize: 14, height: 1.4, fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-              ),
-            )
-                : RefreshIndicator(
-              color: Colors.orange,
-              onRefresh: _fetchBooks,
-              child: ListView.builder(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                itemCount: _books.length,
-                itemBuilder: (context, index) {
-                  if (index < 0 || index >= _books.length) {
-                    return const SizedBox.shrink();
-                  }
+                : Column(
+                    children: [
+                      // Thanh tìm kiếm nhanh trong kho
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: containerBgColor.withOpacity(0.85),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: TextField(
+                            controller: _searchCtrl,
+                            style: const TextStyle(color: Colors.white, fontSize: 13),
+                            onChanged: (val) => setState(() => _searchQuery = val.trim()),
+                            decoration: InputDecoration(
+                              hintText: "Tìm kiếm trong kho (${_books.length} cuốn sách)...",
+                              hintStyle: const TextStyle(color: Colors.white38, fontSize: 12.5),
+                              prefixIcon: const Icon(Icons.search_rounded, color: Colors.orange, size: 20),
+                              suffixIcon: _searchQuery.isNotEmpty
+                                  ? IconButton(
+                                      icon: const Icon(Icons.clear, color: Colors.white54, size: 18),
+                                      onPressed: () {
+                                        _searchCtrl.clear();
+                                        setState(() => _searchQuery = '');
+                                      },
+                                    )
+                                  : null,
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                            ),
+                          ),
+                        ),
+                      ),
 
-                  final book = _books[index];
+                      // Thông tin tổng kết số lượng sách
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              "Kho sách: ${filteredBooks.length} / ${_books.length} cuốn",
+                              style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              "Project Gutenberg & LibriVox",
+                              style: TextStyle(color: Colors.tealAccent.withOpacity(0.7), fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // Danh sách sách
+                      Expanded(
+                        child: filteredBooks.isEmpty
+                            ? Center(
+                                child: Container(
+                                  padding: const EdgeInsets.all(24),
+                                  margin: const EdgeInsets.all(20),
+                                  decoration: BoxDecoration(
+                                    color: containerBgColor.withOpacity(0.8),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: Colors.white10),
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.search_off_rounded, color: Colors.white.withOpacity(0.3), size: 48),
+                                      const SizedBox(height: 12),
+                                      Text(
+                                        _searchQuery.isNotEmpty
+                                            ? "Không tìm thấy sách phù hợp với \"$_searchQuery\""
+                                            : "Thư viện trống không!\nHãy thêm sách mới bằng nút Admin nhé.",
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: Colors.white54, fontSize: 13, height: 1.4),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              )
+                            : RefreshIndicator(
+                                color: Colors.orange,
+                                onRefresh: _fetchBooks,
+                                child: ListView.builder(
+                                  physics: const AlwaysScrollableScrollPhysics(),
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                  itemCount: filteredBooks.length,
+                                  itemBuilder: (context, index) {
+                                    if (index < 0 || index >= filteredBooks.length) {
+                                      return const SizedBox.shrink();
+                                    }
+
+                                    final book = filteredBooks[index];
                   if (book == null) return const SizedBox.shrink();
 
                   final int bookId = book['id'] ?? 0;
@@ -226,7 +312,7 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
                   final String author = book['author'] ?? 'Chưa rõ tác giả';
                   final String imageUrl = book['image_url'] ?? '';
 
-                  final correctedImageUrl = imageUrl.replaceAll('localhost', '10.0.2.2');
+                  final correctedImageUrl = ApiConfig.formatUrl(imageUrl);
 
                   return Container(
                     key: bookId != 0 ? ValueKey("manage_book_${bookId}_$index") : UniqueKey(),
@@ -338,6 +424,9 @@ class _BookManagementScreenState extends State<BookManagementScreen> {
           ),
         ],
       ),
-    );
+    ),
+  ],
+),
+);
   }
 }

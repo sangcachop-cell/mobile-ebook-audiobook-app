@@ -7,11 +7,16 @@ import 'dart:convert';
 
 // --- IMPORT CÁC MÀN HÌNH HỆ THỐNG ---
 import 'admin_screen.dart';
+import 'admin_online_books_screen.dart';
 import 'book_management_screen.dart';
 import 'user_management_screen.dart';
-import 'pdf_viewer_screen.dart';        // Trình xem PDF để nhảy trang bookmark
 import 'admin_order_screen.dart';       // Giao diện duyệt đơn của Admin
 import 'user_order_history_screen.dart'; // Giao diện lịch sử đơn của User
+import 'api_config.dart';
+import 'user_session.dart';
+import 'book_reader_helper.dart';
+import 'audio_player_service.dart';
+import 'audio_player_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   final String username;
@@ -58,7 +63,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // Tải dữ liệu hồ sơ cá nhân của người dùng
   Future<void> _loadProfileData() async {
     if (_isGuest) return;
-    final url = Uri.parse('http://10.0.2.2:8000/api/admin/users');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/admin/users');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -87,7 +92,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _isLoadingBookmarks = true);
 
     final String formattedUsername = widget.username.trim();
-    final url = Uri.parse('http://10.0.2.2:8000/api/bookmarks/$formattedUsername');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/bookmarks/$formattedUsername');
 
     debugPrint("=== ĐANG KHỞI CHẠY LẤY BOOKMARK ===");
     debugPrint("Đường dẫn API gọi tới: $url");
@@ -137,7 +142,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return;
     }
     setState(() => _isUpdating = true);
-    final url = Uri.parse('http://10.0.2.2:8000/api/user/update_profile');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/user/update_profile');
 
     try {
       var request = http.MultipartRequest('POST', url);
@@ -592,15 +597,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             subtitle: Padding(
                               padding: const EdgeInsets.only(left: 26.0, top: 2),
                               child: Text(
-                                "Đã đánh dấu: ${bookmarks.length} trang",
+                                "Đã đánh dấu: ${bookmarks.length} mục",
                                 style: TextStyle(color: Colors.orange[300], fontSize: 11, fontWeight: FontWeight.bold),
                               ),
                             ),
                             children: bookmarks.map((item) {
-                              final int pageNum = item['page_number'] ?? item['page_index'] ?? 1;
+                              final int pageNum = item['page_number'] ?? item['page_index'] ?? 0;
+                              final int audioPosMs = item['audio_position_ms'] ?? 0;
                               final int bookId = item['book_id'] ?? 0;
                               final String pdfUrl = item['pdf_url'] ?? '';
+                              final String audioUrl = item['audio_url'] ?? '';
+                              final String imageUrl = item['image_url'] ?? '';
+                              final String bookAuthor = item['book_author'] ?? '';
                               final String note = item['note'] ?? item['notes'] ?? '';
+
+                              final isAudioBm = audioPosMs > 0;
+                              final mins = audioPosMs ~/ 60000;
+                              final secs = (audioPosMs % 60000) ~/ 1000;
+                              final formattedTime = '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
+                              final bookmarkTitle = isAudioBm ? "Mốc âm thanh $formattedTime" : "Trang số $pageNum";
+                              final bookmarkIcon = isAudioBm ? Icons.headset_rounded : Icons.bookmark_added_rounded;
 
                               return Container(
                                 decoration: const BoxDecoration(
@@ -611,10 +627,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   title: Row(
                                     crossAxisAlignment: CrossAxisAlignment.center,
                                     children: [
-                                      const Icon(Icons.bookmark_added_rounded, color: Colors.amber, size: 16),
+                                      Icon(bookmarkIcon, color: Colors.amber, size: 16),
                                       const SizedBox(width: 8),
                                       Text(
-                                        "Trang số $pageNum",
+                                        bookmarkTitle,
                                         style: const TextStyle(
                                             color: Colors.white,
                                             fontSize: 13,
@@ -641,7 +657,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                           const SizedBox(width: 6),
                                           Expanded(
                                             child: Text(
-                                              note.trim().isNotEmpty ? note : "Không có ghi chú cho trang này.",
+                                              note.trim().isNotEmpty ? note : "Không có ghi chú cho mục này.",
                                               style: TextStyle(
                                                   color: note.trim().isNotEmpty ? Colors.white70 : Colors.white30,
                                                   fontSize: 11,
@@ -654,25 +670,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                     ),
                                   ),
                                   onTap: () async {
-                                    if (pdfUrl.isEmpty) {
-                                      _showSnackBar("Sách không có định dạng PDF để hiển thị!", Colors.redAccent);
-                                      return;
+                                    if (isAudioBm && audioUrl.isNotEmpty) {
+                                      AudioPlayerService().playBook(
+                                        bookId: bookId,
+                                        title: bookTitle,
+                                        author: bookAuthor,
+                                        audioUrl: ApiConfig.formatUrl(audioUrl),
+                                        coverUrl: ApiConfig.formatUrl(imageUrl),
+                                      );
+                                      await AudioPlayerService().seek(Duration(milliseconds: audioPosMs));
+                                      if (context.mounted) {
+                                        await Navigator.push(
+                                          context,
+                                          MaterialPageRoute(builder: (context) => const AudioPlayerScreen()),
+                                        );
+                                      }
+                                    } else if (pdfUrl.isNotEmpty) {
+                                      await BookReaderHelper.openBook(
+                                        context: context,
+                                        fileUrl: ApiConfig.formatUrl(pdfUrl),
+                                        bookTitle: bookTitle,
+                                        bookId: bookId,
+                                        username: widget.username,
+                                        initialPage: pageNum > 0 ? pageNum - 1 : 0,
+                                      );
+                                    } else {
+                                      _showSnackBar("Sách không có tệp đọc hoặc nghe khả dụng!", Colors.redAccent);
                                     }
-
-                                    final String correctedPdfUrl = pdfUrl.replaceAll('localhost', '10.0.2.2');
-
-                                    await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (context) => PdfViewerScreen(
-                                          pdfUrl: correctedPdfUrl,
-                                          bookTitle: bookTitle,
-                                          bookId: bookId,
-                                          username: widget.username,
-                                          initialPage: pageNum - 1,
-                                        ),
-                                      ),
-                                    );
                                     _fetchAndGroupBookmarks();
                                   },
                                 ),
@@ -717,6 +741,35 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           Navigator.push(
                             context,
                             MaterialPageRoute(builder: (context) => AdminScreen(adminUsername: widget.username)),
+                          );
+                        },
+                      ),
+                    ),
+
+                    // 1.5. Nút Tải Sách Mở Trực Tuyến (AdminOnlineBooksScreen)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 14),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[900]!.withOpacity(0.75),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.tealAccent.withOpacity(0.35), width: 1),
+                        boxShadow: [
+                          BoxShadow(color: Colors.tealAccent.withOpacity(0.08), blurRadius: 10, spreadRadius: 1),
+                        ],
+                      ),
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.teal.withOpacity(0.25),
+                          child: const Icon(Icons.cloud_download_rounded, color: Colors.tealAccent, size: 24),
+                        ),
+                        title: const Text("Tải Sách Mở Trực Tuyến", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+                        subtitle: const Text("Tìm & nạp sách từ Gutenberg, LibriVox & Open Library", style: TextStyle(color: Colors.white54, fontSize: 11)),
+                        trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: Colors.white30),
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (context) => AdminOnlineBooksScreen(adminUsername: widget.username)),
                           );
                         },
                       ),
@@ -810,7 +863,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         size: 14,
                         color: _isGuest ? Colors.greenAccent : Colors.redAccent,
                       ),
-                      onTap: () => Navigator.pushNamedAndRemoveUntil(context, '/welcome', (route) => false),
+                      onTap: () async {
+                        await UserSession.clearSession();
+                        if (context.mounted) {
+                          Navigator.pushNamedAndRemoveUntil(context, '/welcome', (route) => false);
+                        }
+                      },
                     ),
                   ),
                 ],

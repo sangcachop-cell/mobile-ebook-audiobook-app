@@ -30,6 +30,9 @@ dependencies:
   flutter_pdfview: ^1.4.4
   path_provider: ^2.1.5
   image_picker: ^1.2.2
+  shared_preferences: ^2.5.6
+  epub_view: ^3.3.0
+  web: ^1.1.0
 
 dev_dependencies:
   flutter_test:
@@ -39,7 +42,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # Khai báo tài nguyên Assets cục bộ trong ứng dụng (Nếu Bảo cần dùng sau này)
-  #assets:
-    #- assets/images/
-    #- assets/audios/
+dependency_overrides:
+  html: 0.15.6

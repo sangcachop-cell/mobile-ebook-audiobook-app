@@ -1,30 +1,27 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:book_audio_app/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('BookApp welcome screen smoke test', (WidgetTester tester) async {
+    final originalOnError = FlutterError.onError;
+    FlutterError.onError = (FlutterErrorDetails details) {
+      final msg = details.exception.toString();
+      if (msg.contains('NetworkImage') || msg.contains('HTTP request failed') || msg.contains('statusCode: 400')) {
+        return;
+      }
+      originalOnError?.call(details);
+    };
+    addTearDown(() => FlutterError.onError = originalOnError);
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpWidget(const BookApp());
     await tester.pump();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Verify WelcomeScreen text exists
+    expect(find.text('Chào Mừng Đến Với'), findsOneWidget);
+    expect(find.text('Sách & AudioBook'), findsOneWidget);
+    expect(find.text('Đăng Nhập'), findsOneWidget);
   });
 }
+
+

@@ -1,6 +1,20 @@
 import os
+import sys
 import time
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Đảm bảo thư mục backend luôn nằm trong sys.path để import database thành công từ mọi nơi
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
@@ -9,6 +23,8 @@ from pydantic import BaseModel, field_validator
 import pymysql
 import uvicorn
 import uuid
+import re
+import httpx
 from typing import Optional, List, Union
 
 app = FastAPI()
@@ -42,35 +58,39 @@ async def validation_exception_handler(request, exc):
     )
 
 # --- CẤU HÌNH LƯU TRỮ FILE TĨNH ---
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = os.path.join(CURRENT_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Cấu hình mở cổng truy cập các file tĩnh (bao gồm ảnh bìa sách, pdf, mp3, avatar, và ảnh bài đăng...)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
-DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "",
-    "database": "ebook_app",
-    "autocommit": True
-}
-
-def get_connection():
-    return pymysql.connect(**DB_CONFIG, cursorclass=pymysql.cursors.DictCursor)
+from database import get_connection, init_db
 
 # --- MODEL DATA (PYDANTIC) ---
 class UserAuth(BaseModel):
     username: str
     password: str
 
-# Model hỗ trợ toggle bookmark (Đã bổ sung trường note tùy chọn)
+class UserRegisterInput(BaseModel):
+    username: str
+    password: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+# Model hỗ trợ toggle bookmark (Hỗ trợ cả trang PDF/EPUB và mốc thời gian Audio)
 class BookmarkInput(BaseModel):
     username: str
     book_id: int
-    page_number: int
+    page_number: Optional[int] = 0
+    audio_position_ms: Optional[int] = 0
     note: Optional[str] = ""  # Nhận nội dung ghi chú từ Flutter gửi lên
+
+# Model hỗ trợ quên/đặt lại mật khẩu
+class ForgotPasswordInput(BaseModel):
+    username: str
+    new_password: str
 
 
 # --- [TỐI ƯU HÓA] MODEL CHO HỆ THỐNG ĐƠN HÀNG (TRÁNH LỖI 422) ---
@@ -117,236 +137,258 @@ class UpdateOrderStatusInput(BaseModel):
     order_id: int
     status: str  # pending, shipping, completed, cancelled
 
+class ReadingProgressInput(BaseModel):
+    username: str
+    book_id: int
+    last_page: Optional[int] = 0
+    last_epub_cfi: Optional[str] = ""
+    last_audio_position_ms: Optional[int] = 0
+    progress_percent: Optional[float] = 0.0
+
+class ReviewInput(BaseModel):
+    book_id: int
+    username: str
+    rating: int
+    comment: Optional[str] = ""
+
+class OnlineBookImportInput(BaseModel):
+    username: str
+    title: str
+    author: Optional[str] = "Nhiều tác giả"
+    content: Optional[str] = ""
+    description: Optional[str] = ""
+    category: Optional[str] = "Văn học & Tiểu thuyết"
+    image_url: Optional[str] = ""
+    pdf_url: Optional[str] = ""
+    audio_url: Optional[str] = ""
+    source: Optional[str] = "Project Gutenberg & LibriVox"
+    external_id: Optional[str] = ""
+    rating_avg: Optional[float] = 4.8
+    review_count: Optional[int] = 25
 
 # --- 1. KHỞI TẠO & TỰ ĐỘNG CẬP NHẬT DATABASE ---
-def init_db():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # Bảng books (Chứa thông tin sách đọc/nghe và các link file tĩnh cục bộ)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS books (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            author VARCHAR(255),
-            content TEXT,
-            audio_url VARCHAR(500),
-            image_url VARCHAR(500),
-            pdf_url VARCHAR(500)
-        )
-    ''')
-
-    # BẢNG: shop_books (Chứa thông tin của Kệ Sách Bán độc lập)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS shop_books (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            author VARCHAR(255) NOT NULL,
-            price DECIMAL(10, 2) NOT NULL,
-            image_path VARCHAR(500),
-            description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    print(">>> [Hệ thống] Khởi tạo bảng shop_books thành công!")
-
-    # Tự động nâng cấp bảng books nếu chưa có pdf_url
-    try:
-        cursor.execute("""
-            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'ebook_app' AND TABLE_NAME = 'books' AND COLUMN_NAME = 'pdf_url'
-        """)
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE books ADD COLUMN pdf_url VARCHAR(500) AFTER image_url")
-            print(">>> [Hệ thống] Đã tự động nâng cấp bảng books: Thêm cột 'pdf_url'!")
-    except Exception as db_err:
-        print(f">>> Lỗi nâng cấp bảng books: {db_err}")
-
-
-    # Bảng users
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(100) UNIQUE NOT NULL,
-            password VARCHAR(100) NOT NULL,
-            is_admin BOOLEAN DEFAULT FALSE,
-            full_name VARCHAR(255),
-            avatar_url VARCHAR(500)
-        )
-    ''')
-
-    # TỰ ĐỘNG NÂNG CẤP BẢNG users: THÊM full_name & avatar_url NẾU CHƯA CÓ
-    try:
-        cursor.execute("""
-            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'ebook_app' AND TABLE_NAME = 'users' AND COLUMN_NAME = 'full_name'
-        """)
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE users ADD COLUMN full_name VARCHAR(255) AFTER is_admin")
-            print(">>> [Hệ thống] Đã tự động nâng cấp bảng users: Thêm cột 'full_name'!")
-
-        cursor.execute("""
-            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'ebook_app' AND TABLE_NAME = 'users' AND COLUMN_NAME = 'avatar_url'
-        """)
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE users ADD COLUMN avatar_url VARCHAR(500) AFTER full_name")
-            print(">>> [Hệ thống] Đã tự động nâng cấp bảng users: Thêm cột 'avatar_url'!")
-    except Exception as db_err:
-        print(f">>> Lỗi nâng cấp bảng users: {db_err}")
-
-
-    # --- BẢNG LƯU TRỮ BOOKMARK ---
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bookmarks (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(100) NOT NULL,
-            book_id INT NOT NULL,
-            page_number INT NOT NULL,
-            note TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_user_book_page (username, book_id, page_number),
-            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
-        )
-    ''')
-
-    # TỰ ĐỘNG NÂNG CẤP BẢNG bookmarks: Thêm cột 'note' nếu chưa có
-    try:
-        cursor.execute("""
-            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'ebook_app' AND TABLE_NAME = 'bookmarks' AND COLUMN_NAME = 'note'
-        """)
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE bookmarks ADD COLUMN note TEXT AFTER page_number")
-            print(">>> [Hệ thống] Đã tự động nâng cấp bảng bookmarks: Thêm cột 'note' thành công!")
-    except Exception as db_err:
-        print(f">>> Lỗi nâng cấp bảng bookmarks: {db_err}")
-
-    print(">>> [Hệ thống] Khởi tạo bảng bookmarks thành công!")
-
-
-    # ===================================================================
-    # KHỞI TẠO CÁC BẢNG CHO TÍNH NĂNG KHÁM PHÁ (NEWS FEED)
-    # ===================================================================
-
-    # 1. Bảng posts (Có bổ sung trường status cho cơ chế kiểm duyệt)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS posts (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(100) NOT NULL,
-            content TEXT NOT NULL,
-            image_url VARCHAR(500),
-            status VARCHAR(50) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # TỰ ĐỘNG NÂNG CẤP BẢNG posts: Thêm cột 'status' nếu bảng đã có sẵn từ trước
-    try:
-        cursor.execute("""
-            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'ebook_app' AND TABLE_NAME = 'posts' AND COLUMN_NAME = 'status'
-        """)
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE posts ADD COLUMN status VARCHAR(50) DEFAULT 'pending' AFTER image_url")
-            print(">>> [Hệ thống] Đã tự động nâng cấp bảng posts: Thêm cột kiểm duyệt 'status'!")
-    except Exception as db_err:
-        print(f">>> Lỗi nâng cấp bảng posts: {db_err}")
-
-    # 2. Bảng likes (Lượt thích bài viết)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS likes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            post_id INT NOT NULL,
-            username VARCHAR(100) NOT NULL,
-            UNIQUE KEY unique_user_post_like (username, post_id),
-            FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
-        )
-    ''')
-
-    # 3. Bảng comments (Bình luận bài viết)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS comments (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            post_id INT NOT NULL,
-            username VARCHAR(100) NOT NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
-        )
-    ''')
-
-    # --- [BỔ SUNG BẢNG MỚI] QUẢN LÝ ĐƠN HÀNG (ORDERS & ORDER_ITEMS) ---
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(100) NOT NULL,
-            full_name VARCHAR(255) NOT NULL,
-            phone VARCHAR(50) NOT NULL,
-            address TEXT NOT NULL,
-            total_amount DECIMAL(10, 2) NOT NULL,
-            status VARCHAR(50) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS order_items (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            order_id INT NOT NULL,
-            book_id INT NOT NULL,
-            quantity INT NOT NULL,
-            price DECIMAL(10, 2) NOT NULL,
-            FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-            FOREIGN KEY (book_id) REFERENCES shop_books(id) ON DELETE CASCADE
-        )
-    ''')
-    print(">>> [Hệ thống] Khởi tạo các bảng Quản lý đơn hàng thành công!")
-
-
-    # TỰ ĐỘNG TẠO TÀI KHOẢN ADMIN MẶC ĐỊNH
-    cursor.execute("SELECT * FROM users WHERE username = 'admin'")
-    admin_exist = cursor.fetchone()
-    if not admin_exist:
-        cursor.execute(
-            "INSERT INTO users (username, password, is_admin, full_name) VALUES (%s, %s, %s, %s)",
-            ("admin", "123", True, "Quản trị viên")
-        )
-        print(">>> Đã khởi tạo tài khoản admin mặc định thành công!")
-
-    cursor.close()
-    conn.close()
-
-# Chạy khởi tạo Database tự động khi khởi động server
+# init_db is handled by database.py
 init_db()
 
 
 # --- 2. CÁC API HỆ THỐNG ---
 
-# API Đăng ký tài khoản thường
+# API Kiểm tra trạng thái máy chủ (Healthcheck / Ping)
+@app.get("/api/ping")
+def ping():
+    return {
+        "status": "ok",
+        "message": "BookHub Backend is online",
+        "timestamp": int(time.time())
+    }
+
+# API Proxy tải file tránh lỗi CORS trên Web Browser (hỗ trợ EPUB từ Gutenberg & Audiobook MP3 từ LibriVox)
+@app.get("/api/proxy-file")
+async def proxy_file(url: str, request: Request):
+    if not url or not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="URL không hợp lệ!")
+    
+    # 0. Chuẩn hóa URL (bỏ www. khỏi archive.org để tránh lỗi timeout mạng)
+    clean_url = url.replace("www.archive.org", "archive.org")
+
+    is_audio = any(ext in clean_url.lower() for ext in [".mp3", ".m4a", ".wav", ".ogg", "librivox"]) or "audio" in clean_url.lower()
+    is_pdf = clean_url.lower().endswith(".pdf") or "pdf" in clean_url.lower()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BookHub/2026 Media-Proxy",
+        "Accept": "audio/*, application/epub+zip, application/octet-stream, */*",
+    }
+
+    # Chuyển tiếp Range header từ trình duyệt/client nếu có (cần thiết cho audio stream và seek)
+    client_range = request.headers.get("range")
+    if client_range:
+        headers["Range"] = client_range
+
+    candidate_urls = [clean_url]
+    gutenberg_match = re.search(r"gutenberg\.org/(?:ebooks/|cache/epub/)?(\d+)", clean_url)
+    if gutenberg_match:
+        g_id = gutenberg_match.group(1)
+        candidate_urls.insert(0, f"https://www.gutenberg.org/cache/epub/{g_id}/pg{g_id}.epub")
+        candidate_urls.append(f"https://www.gutenberg.org/ebooks/{g_id}.epub3.images")
+        candidate_urls.append(f"https://www.gutenberg.org/ebooks/{g_id}.epub.noimages")
+
+    seen = set()
+    unique_candidates = []
+    for c in candidate_urls:
+        if c not in seen:
+            seen.add(c)
+            unique_candidates.append(c)
+
+    # Thử tải từ xa (timeout ngắn 8s cho audio để tránh làm đơ ứng dụng)
+    fetch_timeout = 8.0 if is_audio else 20.0
+    for target in unique_candidates:
+        try:
+            async with httpx.AsyncClient(
+                timeout=fetch_timeout,
+                follow_redirects=True,
+                headers=headers,
+                verify=False
+            ) as client:
+                resp = await client.get(target)
+                if resp.status_code in [200, 206] and len(resp.content) > 500:
+                    c_type = "audio/mpeg" if is_audio else resp.headers.get("content-type", "application/epub+zip")
+                    resp_headers = {
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "*",
+                        "Access-Control-Allow-Headers": "*",
+                        "Accept-Ranges": "bytes",
+                        "Content-Disposition": "inline",
+                    }
+                    if "content-range" in resp.headers:
+                        resp_headers["Content-Range"] = resp.headers["content-range"]
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=c_type,
+                        headers=resp_headers
+                    )
+        except Exception as err:
+            print(f">>> Thử tải {target} không thành công: {err}")
+            continue
+
+    # 3. Fallback: Nếu không tải được từ xa, phục vụ tệp fallback nội bộ tương ứng
+    try:
+        if is_audio:
+            # Fallback audio: audio_sample_1.mp3
+            fallback_filename = "audio_sample_1.mp3"
+            fallback_path = os.path.join(UPLOAD_DIR, fallback_filename)
+            if os.path.exists(fallback_path):
+                file_size = os.path.getsize(fallback_path)
+                with open(fallback_path, "rb") as f:
+                    if client_range and client_range.startswith("bytes="):
+                        range_val = client_range.replace("bytes=", "").split("-")
+                        start = int(range_val[0]) if range_val[0] else 0
+                        end = int(range_val[1]) if len(range_val) > 1 and range_val[1] else file_size - 1
+                        if end >= file_size:
+                            end = file_size - 1
+                        length = end - start + 1
+                        f.seek(start)
+                        chunk = f.read(length)
+                        return Response(
+                            content=chunk,
+                            status_code=206,
+                            media_type="audio/mpeg",
+                            headers={
+                                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                                "Accept-Ranges": "bytes",
+                                "Content-Length": str(length),
+                                "Access-Control-Allow-Origin": "*",
+                                "Access-Control-Allow-Methods": "*",
+                                "Access-Control-Allow-Headers": "*",
+                            }
+                        )
+                    else:
+                        audio_data = f.read()
+                        return Response(
+                            content=audio_data,
+                            media_type="audio/mpeg",
+                            headers={
+                                "Accept-Ranges": "bytes",
+                                "Access-Control-Allow-Origin": "*",
+                                "Access-Control-Allow-Methods": "*",
+                                "Access-Control-Allow-Headers": "*",
+                            }
+                        )
+        else:
+            fallback_filename = "dac_nhan_tam.pdf" if is_pdf else "nha_gia_kim.epub"
+            fallback_path = os.path.join(UPLOAD_DIR, fallback_filename)
+            if os.path.exists(fallback_path):
+                with open(fallback_path, "rb") as f:
+                    fallback_data = f.read()
+                c_type = "application/pdf" if is_pdf else "application/epub+zip"
+                return Response(
+                    content=fallback_data,
+                    media_type=c_type,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "*",
+                        "Access-Control-Allow-Headers": "*",
+                        "Content-Disposition": "inline",
+                    }
+                )
+    except Exception as e:
+        print(f">>> Lỗi khi đọc file fallback: {e}")
+
+    raise HTTPException(status_code=404, detail="Không thể tải tệp sách sau khi thử tất cả các nguồn.")
+
+# API Đăng ký tài khoản người dùng chi tiết
 @app.post("/api/register")
-def register(user: UserAuth):
+def register(user: UserRegisterInput):
+    username = user.username.strip()
+    password = user.password.strip()
+    full_name = (user.full_name or "").strip()
+    email = (user.email or "").strip().lower()
+    phone = (user.phone or "").strip()
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Vui lòng điền đầy đủ tên đăng nhập và mật khẩu!")
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="Tên đăng nhập phải chứa ít nhất 3 ký tự!")
+    if " " in username:
+        raise HTTPException(status_code=400, detail="Tên đăng nhập không được chứa khoảng trắng!")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Mật khẩu phải chứa ít nhất 6 ký tự để đảm bảo bảo mật!")
+
+    # Kiểm tra định dạng email nếu người dùng cung cấp
+    if email:
+        email_regex = r"^[\w\.-]+@([\w-]+\.)+[\w-]{2,4}$"
+        if not re.match(email_regex, email):
+            raise HTTPException(status_code=400, detail="Địa chỉ email không đúng định dạng hợp lệ!")
+
+    # Kiểm tra số điện thoại nếu người dùng cung cấp
+    if phone:
+        phone_cleaned = re.sub(r"\D", "", phone)
+        if len(phone_cleaned) < 9 or len(phone_cleaned) > 11:
+            raise HTTPException(status_code=400, detail="Số điện thoại phải từ 9 đến 11 chữ số!")
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        # Kiểm tra username đã tồn tại chưa
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"Tên tài khoản '{username}' đã tồn tại! Vui lòng chọn tên khác.")
+
+        # Kiểm tra email đã được đăng ký chưa nếu có email
+        if email:
+            cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if cursor.fetchone():
+                raise HTTPException(status_code=400, detail=f"Địa chỉ email '{email}' đã được liên kết với một tài khoản khác!")
+
+        display_name = full_name if full_name else username
         cursor.execute(
-            "INSERT INTO users (username, password, is_admin, full_name) VALUES (%s, %s, FALSE, %s)",
-            (user.username, user.password, user.username)
+            "INSERT INTO users (username, password, is_admin, full_name, email, phone) VALUES (%s, %s, 0, %s, %s, %s)",
+            (username, password, display_name, email if email else None, phone if phone else None)
         )
-        return {"status": "success", "message": "Đăng ký thành công!"}
+        return {
+            "status": "success",
+            "message": f"Đăng ký tài khoản thành công! Chào mừng {display_name}.",
+            "username": username,
+            "full_name": display_name
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Tên tài khoản đã tồn tại hoặc lỗi dữ liệu!")
+        print(f"Lỗi đăng ký: {e}")
+        raise HTTPException(status_code=400, detail=f"Lỗi đăng ký: {str(e)}")
     finally:
         conn.close()
 
 # API Đăng nhập
 @app.post("/api/login")
 def login(user: UserAuth):
+    username = user.username.strip()
+    password = user.password.strip()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT id, username, is_admin, full_name, avatar_url FROM users WHERE username = %s AND password = %s",
-        (user.username, user.password)
+        (username, password)
     )
     row = cursor.fetchone()
     conn.close()
@@ -363,6 +405,31 @@ def login(user: UserAuth):
         }
     else:
         raise HTTPException(status_code=401, detail="Sai tài khoản hoặc mật khẩu")
+
+
+# --- API QUÊN / ĐẶT LẠI MẬT KHẨU (MODULE 1) ---
+@app.post("/api/auth/forgot-password")
+def forgot_password(data: ForgotPasswordInput):
+    username = data.username.strip()
+    new_password = data.new_password.strip()
+
+    if not username or not new_password:
+        raise HTTPException(status_code=400, detail="Tên đăng nhập và mật khẩu mới không được để trống!")
+    if len(new_password) < 3:
+        raise HTTPException(status_code=400, detail="Mật khẩu mới phải có ít nhất 3 ký tự!")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản với tên đăng nhập này!")
+
+        cursor.execute("UPDATE users SET password = %s WHERE username = %s", (new_password, username))
+        return {"status": "success", "message": "Đặt lại mật khẩu thành công! Bạn có thể đăng nhập ngay."}
+    finally:
+        conn.close()
 
 
 # --- API CẬP NHẬT THÔNG TIN CÁ NHÂN (HỌ TÊN & AVATAR VẬT LÝ) ---
@@ -423,15 +490,228 @@ async def update_profile(
         raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
 
 
-# API Lấy danh sách tất cả các sách (Để đọc/nghe)
+# API Lấy danh sách tất cả các sách (Để đọc/nghe, hỗ trợ lọc theo thể loại và từ khóa)
 @app.get("/api/books")
-def get_all_books():
+def get_all_books(category: Optional[str] = None, search: Optional[str] = None):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM books")
+    sql = "SELECT * FROM books"
+    params = []
+    conditions = []
+    if category and category.strip() and category != "Tất cả":
+        conditions.append("category = %s")
+        params.append(category.strip())
+    if search and search.strip():
+        conditions.append("(title LIKE %s OR author LIKE %s)")
+        q = f"%{search.strip()}%"
+        params.extend([q, q])
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY CASE WHEN source = N'Kho Sách Việt Nam Tinh Hoa' OR pdf_url LIKE 'uploads/vn_book_%' OR audio_url LIKE 'uploads/vn_book_%' OR id IN (1,2,3,4) THEN 0 ELSE 1 END, id DESC"
+    cursor.execute(sql, tuple(params) if params else None)
     books = cursor.fetchall()
+    for b in books:
+        if 'rating_avg' in b and b['rating_avg'] is not None:
+            b['rating_avg'] = float(b['rating_avg'])
     conn.close()
     return books
+
+
+# API Lấy chi tiết cuốn sách kèm nội dung và danh sách chương
+@app.get("/api/books/{book_id}")
+def get_book_detail(book_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM books WHERE id = %s", (book_id,))
+    book = cursor.fetchone()
+    conn.close()
+    if not book:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cuốn sách này!")
+    if 'rating_avg' in book and book['rating_avg'] is not None:
+        book['rating_avg'] = float(book['rating_avg'])
+    
+    # Phân tích danh sách chương từ content nếu có cấu trúc === Chương X ===
+    raw_content = book.get('content') or ''
+    chapters = []
+    if "===" in raw_content:
+        matches = re.findall(r'===\s*([^=]+)\s*===\n(.*?)(?====\s*[^=]+\s*===|$)', raw_content, re.DOTALL)
+        for idx, (ch_title, ch_text) in enumerate(matches, 1):
+            clean_text = re.sub(r'<[^>]+>', '', ch_text).strip()
+            chapters.append({
+                "id": idx,
+                "title": ch_title.strip(),
+                "content": clean_text,
+                "order": idx
+            })
+    if not chapters and raw_content:
+        clean_text = re.sub(r'<[^>]+>', '', raw_content).strip()
+        chapters.append({
+            "id": 1,
+            "title": "Chương 1: Toàn văn tác phẩm",
+            "content": clean_text,
+            "order": 1
+        })
+    book['chapters'] = chapters
+    return book
+
+
+# API Text-To-Speech (Phát âm tiếng Việt trực tiếp sử dụng neural TTS)
+@app.get("/api/tts/speak")
+async def tts_speak(text: str, voice: Optional[str] = "vi-VN-HoaiMyNeural"):
+    clean_text = text.strip()
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Văn bản không được để trống!")
+    if len(clean_text) > 3000:
+        clean_text = clean_text[:3000]
+    
+    import edge_tts
+    import io
+    try:
+        communicate = edge_tts.Communicate(clean_text, voice=voice)
+        audio_stream = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_stream.write(chunk["data"])
+        audio_bytes = audio_stream.getvalue()
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Content-Disposition": "inline; filename=speech.mp3",
+                "Cache-Control": "public, max-age=86400"
+            }
+        )
+    except Exception as e:
+        print(f">>> Lỗi TTS: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi tạo giọng đọc TTS: {str(e)}")
+
+
+# API Lấy hoặc sinh tự động file Audio thuyết minh đọc nội dung cho từng chương sách
+@app.get("/api/books/{book_id}/chapters/{chapter_index}/audio")
+async def get_chapter_audio(book_id: int, chapter_index: int, request: Request, voice: Optional[str] = "vi-VN-HoaiMyNeural"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, author, content FROM books WHERE id = %s", (book_id,))
+    book = cursor.fetchone()
+    conn.close()
+
+    if not book:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cuốn sách này!")
+
+    raw_content = book.get('content') or ''
+    chapters = []
+    if "===" in raw_content:
+        matches = re.findall(r'===\s*([^=]+)\s*===\n(.*?)(?====\s*[^=]+\s*===|$)', raw_content, re.DOTALL)
+        for idx, (ch_title, ch_text) in enumerate(matches, 1):
+            clean_text = re.sub(r'<[^>]+>', '', ch_text).strip()
+            chapters.append({
+                "id": idx,
+                "title": ch_title.strip(),
+                "content": clean_text
+            })
+    if not chapters and raw_content:
+        chapters.append({
+            "id": 1,
+            "title": "Toàn văn tác phẩm",
+            "content": re.sub(r'<[^>]+>', '', raw_content).strip()
+        })
+
+    if chapter_index < 1 or chapter_index > len(chapters):
+        raise HTTPException(status_code=404, detail="Không tìm thấy chương yêu cầu!")
+
+    target_chapter = chapters[chapter_index - 1]
+    ch_text = target_chapter['content']
+    ch_title = target_chapter['title']
+
+    safe_voice = "hoaimy" if "HoaiMy" in (voice or "") else "namminh"
+    cache_filename = f"audio_book_{book_id}_chap_{chapter_index}_{safe_voice}.mp3"
+    cache_path = os.path.join(UPLOAD_DIR, cache_filename)
+
+    if not os.path.exists(cache_path) or os.path.getsize(cache_path) < 2000:
+        import edge_tts
+        chosen_voice = voice or "vi-VN-HoaiMyNeural"
+        speech_text = f"Tác phẩm {book['title']}. {ch_title}. {ch_text}"
+        if len(speech_text) > 4500:
+            speech_text = speech_text[:4500]
+        try:
+            communicate = edge_tts.Communicate(speech_text, voice=chosen_voice)
+            await communicate.save(cache_path)
+        except Exception as e:
+            print(f">>> Lỗi tạo audio chương {chapter_index}: {e}")
+            fallback_sample = os.path.join(UPLOAD_DIR, "audio_sample_1.mp3")
+            if os.path.exists(fallback_sample):
+                cache_path = fallback_sample
+
+    file_size = os.path.getsize(cache_path)
+    client_range = request.headers.get("range")
+    if client_range and client_range.startswith("bytes="):
+        range_val = client_range.replace("bytes=", "").split("-")
+        start = int(range_val[0]) if range_val[0] else 0
+        end = int(range_val[1]) if len(range_val) > 1 and range_val[1] else file_size - 1
+        if end >= file_size:
+            end = file_size - 1
+        length = end - start + 1
+        with open(cache_path, "rb") as f:
+            f.seek(start)
+            chunk = f.read(length)
+        return Response(
+            content=chunk,
+            status_code=206,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(length),
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
+    else:
+        with open(cache_path, "rb") as f:
+            audio_bytes = f.read()
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Access-Control-Allow-Origin": "*",
+                "Content-Disposition": f"inline; filename={cache_filename}",
+            }
+        )
+
+
+# API Lấy danh mục thể loại và số lượng sách tương ứng
+@app.get("/api/categories")
+def get_categories():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT category, COUNT(*) as count FROM books GROUP BY category ORDER BY count DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+# API TÌM KIẾM SÁCH ONLINE TỪ GUTENDEX, LIBRIVOX & OPEN LIBRARY
+@app.get("/api/admin/online-books/search")
+async def search_online_books_api(query: str = "", source: str = "all", page: int = 1):
+    from online_books import search_all_sources
+    results = await search_all_sources(query=query, source=source, page=page)
+    return results
+
+
+# API ADMIN: TẢI / NHẬP SÁCH TRỰC TIẾP TỪ NGUỒN ONLINE VÀO KHO HỆ THỐNG
+@app.post("/api/admin/online-books/import")
+def import_online_book_api(data: OnlineBookImportInput):
+    from online_books import import_single_book
+    try:
+        res = import_single_book(data.dict(), admin_username=data.username)
+        return res
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi nhập sách: {str(e)}")
+
 
 
 # API ADMIN: Thêm sách và Tải tệp tin vật lý (Đọc/Nghe)
@@ -806,21 +1086,36 @@ def toggle_bookmark(data: BookmarkInput):
                 detail="Tài khoản này không tồn tại trong hệ thống. Vui lòng đăng nhập!"
             )
 
-        cursor.execute(
-            "SELECT id FROM bookmarks WHERE username = %s AND book_id = %s AND page_number = %s",
-            (user_raw, data.book_id, data.page_number)
-        )
+        page_num = data.page_number or 0
+        audio_pos = data.audio_position_ms or 0
+
+        if audio_pos > 0:
+            cursor.execute(
+                "SELECT id FROM bookmarks WHERE username = %s AND book_id = %s AND ABS(ISNULL(audio_position_ms, 0) - %s) <= 2000",
+                (user_raw, data.book_id, audio_pos)
+            )
+        else:
+            cursor.execute(
+                "SELECT id FROM bookmarks WHERE username = %s AND book_id = %s AND page_number = %s",
+                (user_raw, data.book_id, page_num)
+            )
         existing = cursor.fetchone()
 
         if existing:
             cursor.execute("DELETE FROM bookmarks WHERE id = %s", (existing['id'],))
-            return {"status": "removed", "message": f"Đã hủy đánh dấu trang {data.page_number}"}
+            mins = audio_pos // 60000
+            secs = (audio_pos % 60000) // 1000
+            label = f"mốc audio {mins:02d}:{secs:02d}" if audio_pos > 0 else f"trang {page_num}"
+            return {"status": "removed", "message": f"Đã hủy đánh dấu {label}"}
         else:
             cursor.execute(
-                "INSERT INTO bookmarks (username, book_id, page_number, note) VALUES (%s, %s, %s, %s)",
-                (user_raw, data.book_id, data.page_number, data.note)
+                "INSERT INTO bookmarks (username, book_id, page_number, audio_position_ms, note) VALUES (%s, %s, %s, %s, %s)",
+                (user_raw, data.book_id, page_num, audio_pos, data.note)
             )
-            return {"status": "added", "message": f"Đã đánh dấu trang {data.page_number} thành công!"}
+            mins = audio_pos // 60000
+            secs = (audio_pos % 60000) // 1000
+            label = f"mốc audio {mins:02d}:{secs:02d}" if audio_pos > 0 else f"trang {page_num}"
+            return {"status": "added", "message": f"Đã đánh dấu {label} thành công!"}
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -852,8 +1147,8 @@ def get_user_bookmarks(username: str):
             )
 
         sql = """
-            SELECT b.id as bookmark_id, b.book_id, b.page_number, b.note, b.created_at,
-                   s.title as book_title, s.author as book_author, s.image_url, s.pdf_url
+            SELECT b.id as bookmark_id, b.book_id, b.page_number, ISNULL(b.audio_position_ms, 0) as audio_position_ms, b.note, b.created_at,
+                   s.title as book_title, s.author as book_author, s.image_url, s.pdf_url, s.audio_url
             FROM bookmarks b
             JOIN books s ON b.book_id = s.id
             WHERE b.username = %s
@@ -867,6 +1162,31 @@ def get_user_bookmarks(username: str):
     except Exception as e:
         print(">>> LỖI LẤY DANH SÁCH BOOKMARK:", str(e))
         raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+@app.get("/api/bookmarks/{username}/{book_id}")
+def get_book_bookmarks(username: str, book_id: int):
+    user_raw = username.strip()
+    user_lower = user_raw.lower()
+
+    if not user_lower or user_lower in ["guest", "anonymous", "null", "undefined"] or "khách" in user_lower or "khach" in user_lower:
+        return []
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        sql = """
+            SELECT b.id as bookmark_id, b.book_id, b.page_number, ISNULL(b.audio_position_ms, 0) as audio_position_ms, b.note, b.created_at
+            FROM bookmarks b
+            WHERE b.username = %s AND b.book_id = %s
+            ORDER BY b.created_at DESC
+        """
+        cursor.execute(sql, (user_raw, book_id))
+        return cursor.fetchall()
+    except Exception as e:
+        print(">>> LỖI LẤY BOOKMARK CỦA SÁCH:", str(e))
+        return []
     finally:
         conn.close()
 
@@ -1145,6 +1465,226 @@ def add_feed_comment(post_id: int, username: str, content: str = Form(...)):
             conn.close()
         print(">>> LỖI GỬI BÌNH LUẬN KHÁM PHÁ:", str(e))
         raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+
+
+# ===================================================================
+# --- CÁC API TIẾN ĐỘ ĐỌC & BOOKMARK SYNC (MODULE 5) ---
+# ===================================================================
+
+@app.post("/api/progress/update")
+def update_reading_progress(data: ReadingProgressInput):
+    user_raw = data.username.strip()
+    if not user_raw or user_raw.lower() in ["guest", "anonymous", "null", "undefined"]:
+        return {"status": "ignored", "message": "Guest progress not persisted on server"}
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM books WHERE id = %s", (data.book_id,))
+        if not cursor.fetchone():
+            return {"status": "ignored", "message": f"Sách #{data.book_id} không tồn tại trên hệ thống"}
+
+        cursor.execute("SELECT id FROM reading_progress WHERE username = %s AND book_id = %s", (user_raw, data.book_id))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute(
+                """
+                UPDATE reading_progress 
+                SET last_page = %s, last_epub_cfi = %s, last_audio_position_ms = %s, progress_percent = %s, updated_at = GETDATE()
+                WHERE id = %s
+                """,
+                (data.last_page or 0, data.last_epub_cfi or "", data.last_audio_position_ms or 0, data.progress_percent or 0.0, existing['id'])
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO reading_progress (username, book_id, last_page, last_epub_cfi, last_audio_position_ms, progress_percent, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, GETDATE())
+                """,
+                (user_raw, data.book_id, data.last_page or 0, data.last_epub_cfi or "", data.last_audio_position_ms or 0, data.progress_percent or 0.0)
+            )
+        return {"status": "success", "message": "Đã lưu tiến độ thành công!"}
+    except Exception as e:
+        print(">>> LỖI CẬP NHẬT TIẾN ĐỘ:", repr(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+@app.get("/api/progress/{username}")
+def get_user_progress(username: str):
+    user_raw = username.strip()
+    if not user_raw or user_raw.lower() in ["guest", "anonymous", "null", "undefined"]:
+        return []
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        sql = """
+            SELECT p.id, p.book_id, p.last_page, p.last_epub_cfi, p.last_audio_position_ms, 
+                   p.progress_percent, p.updated_at,
+                   b.title, b.author, b.image_url, b.pdf_url, b.audio_url
+            FROM reading_progress p
+            JOIN books b ON p.book_id = b.id
+            WHERE p.username = %s
+            ORDER BY p.updated_at DESC
+        """
+        cursor.execute(sql, (user_raw,))
+        records = cursor.fetchall()
+        for r in records:
+            r['progress_percent'] = float(r.get('progress_percent') or 0.0)
+            if 'updated_at' in r and r['updated_at']:
+                r['updated_at'] = r['updated_at'].strftime("%Y-%m-%d %H:%M:%S")
+        return records
+    except Exception as e:
+        print(">>> LỖI LẤY TIẾN ĐỘ:", repr(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+@app.get("/api/progress/{username}/{book_id}")
+def get_book_progress(username: str, book_id: int):
+    user_raw = username.strip()
+    if not user_raw or user_raw.lower() in ["guest", "anonymous", "null", "undefined"]:
+        return None
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT * FROM reading_progress WHERE username = %s AND book_id = %s",
+            (user_raw, book_id)
+        )
+        row = cursor.fetchone()
+        if row:
+            row['progress_percent'] = float(row.get('progress_percent') or 0.0)
+            if 'updated_at' in row and row['updated_at']:
+                row['updated_at'] = row['updated_at'].strftime("%Y-%m-%d %H:%M:%S")
+        return row
+    except Exception as e:
+        print(">>> LỖI LẤY TIẾN ĐỘ SÁCH:", repr(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+
+# ===================================================================
+# --- CÁC API ĐÁNH GIÁ & BÌNH LUẬN SÁCH (MODULE 7) ---
+# ===================================================================
+
+@app.post("/api/books/{book_id}/reviews")
+def add_book_review(book_id: int, data: ReviewInput):
+    user_raw = data.username.strip()
+    if not user_raw or user_raw.lower() in ["guest", "anonymous", "null", "undefined"]:
+        raise HTTPException(status_code=403, detail="Vui lòng đăng nhập để đánh giá sách!")
+    if data.rating < 1 or data.rating > 5:
+        raise HTTPException(status_code=400, detail="Điểm đánh giá phải từ 1 đến 5 sao!")
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM books WHERE id = %s", (book_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Không tìm thấy cuốn sách này để đánh giá!")
+
+        cursor.execute("SELECT id FROM book_reviews WHERE book_id = %s AND username = %s", (book_id, user_raw))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute(
+                "UPDATE book_reviews SET rating = %s, comment = %s, created_at = GETDATE() WHERE id = %s",
+                (data.rating, data.comment.strip() if data.comment else "", existing['id'])
+            )
+            review_id = existing['id']
+        else:
+            cursor.execute(
+                "INSERT INTO book_reviews (book_id, username, rating, comment, created_at) VALUES (%s, %s, %s, %s, GETDATE())",
+                (book_id, user_raw, data.rating, data.comment.strip() if data.comment else "")
+            )
+            review_id = cursor.lastrowid
+        return {"status": "success", "message": "Đánh giá sách thành công!", "review_id": review_id}
+    except Exception as e:
+        print(">>> LỖI ĐÁNH GIÁ SÁCH:", str(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+@app.get("/api/books/{book_id}/reviews")
+def get_book_reviews(book_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT r.id, r.book_id, r.username, r.rating, r.comment, r.created_at,
+                   u.avatar_url, u.full_name
+            FROM book_reviews r
+            LEFT JOIN users u ON r.username = u.username
+            WHERE r.book_id = %s
+            ORDER BY r.created_at DESC
+            """,
+            (book_id,)
+        )
+        reviews = cursor.fetchall()
+        total_rating = 0
+        for r in reviews:
+            total_rating += r['rating']
+            if 'created_at' in r and r['created_at']:
+                r['created_at'] = r['created_at'].strftime("%Y-%m-%d %H:%M:%S")
+        avg_rating = round(total_rating / len(reviews), 1) if reviews else 0.0
+        return {
+            "reviews": reviews,
+            "average_rating": avg_rating,
+            "total_reviews": len(reviews)
+        }
+    except Exception as e:
+        print(">>> LỖI LẤY ĐÁNH GIÁ SÁCH:", str(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+@app.delete("/api/reviews/{review_id}")
+def delete_book_review(review_id: int, username: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT username FROM book_reviews WHERE id = %s", (review_id,))
+        review = cursor.fetchone()
+        if not review:
+            raise HTTPException(status_code=404, detail="Không tìm thấy đánh giá này!")
+        if username.strip().lower() != "admin" and review['username'] != username.strip():
+            raise HTTPException(status_code=403, detail="Bạn không có quyền xóa đánh giá của người khác!")
+        cursor.execute("DELETE FROM book_reviews WHERE id = %s", (review_id,))
+        return {"status": "success", "message": "Đã xóa đánh giá thành công!"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(">>> LỖI XÓA ĐÁNH GIÁ:", str(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
+
+
+# ===================================================================
+# --- CÁC API BỔ TRỢ ĐƠN HÀNG (MODULE 8) ---
+# ===================================================================
+
+@app.post("/api/orders/{order_id}/cancel")
+def cancel_order(order_id: int, username: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT username, status FROM orders WHERE id = %s", (order_id,))
+        order = cursor.fetchone()
+        if not order:
+            raise HTTPException(status_code=404, detail="Không tìm thấy đơn hàng!")
+        if username.strip().lower() != "admin" and order['username'] != username.strip():
+            raise HTTPException(status_code=403, detail="Bạn không có quyền hủy đơn hàng này!")
+        if order['status'] != 'pending':
+            raise HTTPException(status_code=400, detail="Chỉ có thể hủy đơn hàng khi trạng thái là Đang xử lý (pending)!")
+        cursor.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order_id,))
+        return {"status": "success", "message": "Đã hủy đơn hàng thành công!"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(">>> LỖI HỦY ĐƠN HÀNG:", str(e))
+        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

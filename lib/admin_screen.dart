@@ -3,8 +3,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'dart:ui';
+import 'api_config.dart';
+import 'admin_online_books_screen.dart';
 
 class AdminScreen extends StatefulWidget {
   final String adminUsername;
@@ -34,7 +35,7 @@ class _AdminScreenState extends State<AdminScreen> {
       fileType = FileType.image;
     } else if (type == 'pdf') {
       fileType = FileType.custom;
-      allowedExtensions = ['pdf'];
+      allowedExtensions = ['pdf', 'epub'];
     } else if (type == 'audio') {
       fileType = FileType.audio;
     }
@@ -75,7 +76,7 @@ class _AdminScreenState extends State<AdminScreen> {
 
     setState(() => isUploading = true);
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/admin/add_book');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/admin/add_book');
     var request = http.MultipartRequest('POST', url);
 
     // 1. Thêm các trường thông tin Text thông thường
@@ -150,6 +151,18 @@ class _AdminScreenState extends State<AdminScreen> {
         backgroundColor: Colors.black.withOpacity(0.4),
         elevation: 0,
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.cloud_download_rounded, color: Colors.tealAccent, size: 24),
+            tooltip: "Khám phá & Tải sách Online",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => AdminOnlineBooksScreen(adminUsername: widget.adminUsername)),
+              );
+            },
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -185,7 +198,53 @@ class _AdminScreenState extends State<AdminScreen> {
                 padding: const EdgeInsets.all(20.0),
                 child: Column(
                   children: [
-                    const SizedBox(height: 10),
+                    // Banner dẫn sang Tải Sách Online
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 16),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Colors.teal.withOpacity(0.3), Colors.cyan.withOpacity(0.15)],
+                        ),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.tealAccent.withOpacity(0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          const CircleAvatar(
+                            radius: 20,
+                            backgroundColor: Colors.teal,
+                            child: Icon(Icons.cloud_download_rounded, color: Colors.white, size: 22),
+                          ),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text("Tải Sách Mở Trực Tuyến", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                                Text("Hơn 70,000 sách từ Gutenberg & LibriVox", style: TextStyle(color: Colors.white60, fontSize: 11)),
+                              ],
+                            ),
+                          ),
+                          ElevatedButton(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(builder: (context) => AdminOnlineBooksScreen(adminUsername: widget.adminUsername)),
+                              );
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.tealAccent,
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            ),
+                            child: const Text("Khám phá", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
+                      ),
+                    ),
+
                     // Thẻ kính mờ bao bọc toàn bộ form nhập liệu
                     Container(
                       padding: const EdgeInsets.all(20.0),
@@ -245,9 +304,9 @@ class _AdminScreenState extends State<AdminScreen> {
                             onTap: () => pickFile('image'),
                           ),
 
-                          // 2. Nút chọn file Sách PDF trực tiếp từ máy (Tùy chọn)
+                          // 2. Nút chọn file Sách E-book (PDF hoặc EPUB) trực tiếp từ máy (Tùy chọn)
                           _buildFilePickerButton(
-                            label: "Chọn tệp tin Sách PDF",
+                            label: "Chọn tệp tin Sách (PDF / EPUB)",
                             file: selectedPdf,
                             icon: Icons.picture_as_pdf_rounded,
                             accentColor: Colors.redAccent,
@@ -301,6 +360,30 @@ class _AdminScreenState extends State<AdminScreen> {
                           disabledBackgroundColor: Colors.grey[800],
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                           elevation: 0,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => AdminOnlineBooksScreen(adminUsername: widget.adminUsername),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.cloud_download_rounded, color: Colors.tealAccent, size: 20),
+                        label: const Text(
+                          "TẢI TỰ ĐỘNG TỪ NGUỒN MỞ (GUTENBERG & LIBRIVOX)",
+                          style: TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: Colors.tealAccent.withOpacity(0.5)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
                         ),
                       ),
                     ),

@@ -6,6 +6,13 @@ import 'package:flutter_pdfview/flutter_pdfview.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'api_config.dart';
+import 'progress_service.dart';
+import 'web_pdf_embed.dart';
+import 'audio_player_service.dart';
+import 'audio_player_screen.dart';
+import 'content_reader_screen.dart';
 
 class PdfViewerScreen extends StatefulWidget {
   final String pdfUrl; // URL file PDF online từ server FastAPI
@@ -72,30 +79,59 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
     _downloadAndInitPdf();
   }
 
+  @override
+  void dispose() {
+    _saveLocalProgress(_currentPage);
+    _noteController.dispose();
+    super.dispose();
+  }
+
   // Tải file PDF online lưu thành file local tạm thời để tránh lỗi hiển thị trực tiếp từ URL
   Future<void> _downloadAndInitPdf() async {
     try {
-      final url = widget.pdfUrl;
-      if (!url.startsWith('http')) {
+      final formattedUrl = ApiConfig.formatUrl(widget.pdfUrl);
+
+      // Nếu đang chạy trên nền tảng Web: Sử dụng trực tiếp formattedUrl hiển thị qua iframe
+      if (kIsWeb) {
         if (mounted) {
           setState(() {
-            _localPdfPath = url;
+            _localPdfPath = formattedUrl;
             _isReady = true;
           });
         }
         return;
       }
 
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final dir = await getTemporaryDirectory();
-        final file = File('${dir.path}/book_${widget.bookId}_temp.pdf');
-        await file.writeAsBytes(response.bodyBytes, flush: true);
-
+      if (!formattedUrl.startsWith('http')) {
         if (mounted) {
           setState(() {
-            _localPdfPath = file.path;
+            _localPdfPath = formattedUrl;
+            _isReady = true;
           });
+        }
+        return;
+      }
+
+      final response = await http.get(Uri.parse(formattedUrl));
+      if (response.statusCode == 200) {
+        final bytes = response.bodyBytes;
+        // Kiểm tra magic header %PDF (0x25, 0x50, 0x44, 0x46)
+        if (bytes.length > 4 && bytes[0] == 0x25 && bytes[1] == 0x50 && bytes[2] == 0x44 && bytes[3] == 0x46) {
+          final dir = await getTemporaryDirectory();
+          final file = File('${dir.path}/book_${widget.bookId}_temp.pdf');
+          await file.writeAsBytes(bytes, flush: true);
+
+          if (mounted) {
+            setState(() {
+              _localPdfPath = file.path;
+            });
+          }
+        } else {
+          if (mounted) {
+            setState(() {
+              _errorMessage = "Định dạng tệp không tương thích hoặc bị gián đoạn khi tải từ máy chủ.";
+            });
+          }
         }
       } else {
         if (mounted) {
@@ -121,7 +157,7 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
     final int snapshotPage = _currentPage;
     if (snapshotPage < 0 || snapshotPage >= _totalPages) return;
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/bookmarks/${widget.username.trim()}');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/bookmarks/${widget.username.trim()}');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -147,6 +183,18 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
     }
   }
 
+  Future<void> _saveLocalProgress(int page) async {
+    try {
+      final double percent = _totalPages > 0 ? ((page + 1) / _totalPages * 100) : 0.0;
+      await ProgressService.updateProgress(
+        bookId: widget.bookId,
+        username: widget.username,
+        lastPage: page,
+        progressPercent: percent,
+      );
+    } catch (_) {}
+  }
+
   // Hàm ép nhảy trang an toàn bọc lót nhiều tầng
   void _safeJumpToInitialPage() async {
     if (_hasJumpedToInitialPage || _pdfViewController == null) return;
@@ -157,6 +205,10 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
     if (mounted && _totalPages > 0) {
       // Giới hạn trang nhảy tới phải nằm trong khoảng hợp lệ từ [0 đến _totalPages - 1]
       int targetPage = widget.initialPage;
+      if (targetPage <= 0) {
+        final prefs = await SharedPreferences.getInstance();
+        targetPage = prefs.getInt('pdf_page_${widget.username.trim()}_${widget.bookId}') ?? 0;
+      }
       if (targetPage < 0) targetPage = 0;
       if (targetPage >= _totalPages) targetPage = _totalPages - 1;
 
@@ -255,7 +307,7 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
   // Hàm gọi API xử lý đánh dấu trang sách gửi lên FastAPI Server
   Future<void> _toggleBookmarkOnServer(String noteText) async {
     if (!mounted || _totalPages <= 0 || _currentPage < 0 || _currentPage >= _totalPages) return;
-    final url = Uri.parse('http://10.0.2.2:8000/api/bookmarks/toggle');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/bookmarks/toggle');
     try {
       final response = await http.post(
         url,
@@ -360,6 +412,32 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           IconButton(
+            icon: const Icon(Icons.headset_rounded, color: Colors.orangeAccent),
+            tooltip: "Nghe sách nói",
+            onPressed: () {
+              final audioUrl = ApiConfig.formatUrl('uploads/vn_book_${widget.bookId}.mp3');
+              AudioPlayerService().playBook(
+                bookId: widget.bookId,
+                title: widget.bookTitle,
+                author: 'Tác giả',
+                audioUrl: audioUrl,
+                coverUrl: '',
+              );
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const AudioPlayerScreen()),
+              );
+            },
+          ),
+          if (kIsWeb && _localPdfPath != null)
+            IconButton(
+              tooltip: "Mở trong tab mới",
+              icon: const Icon(Icons.open_in_new_rounded, color: Colors.white70),
+              onPressed: () {
+                openPdfInNewTab(_localPdfPath!);
+              },
+            ),
+          IconButton(
             icon: Icon(
               _isBookmarked ? Icons.bookmark_added_rounded : Icons.bookmark_border_rounded,
               color: _isBookmarked ? Colors.amber : Colors.white70,
@@ -379,58 +457,86 @@ class _PdfViewerScreenState extends State<PdfViewerScreen> {
       body: Stack(
         children: [
           if (_localPdfPath != null)
-            PDFView(
-              filePath: _localPdfPath!,
-              onRender: (pages) {
-                if (mounted) {
-                  setState(() {
-                    _totalPages = pages ?? 0;
-                    _isReady = true;
-                  });
-                  _safeJumpToInitialPage();
-                }
-              },
-              onError: (error) {
-                if (mounted) {
-                  setState(() {
-                    _errorMessage = error.toString();
-                  });
-                }
-              },
-              onViewCreated: (pdfViewController) {
-                _pdfViewController = pdfViewController;
-                _safeJumpToInitialPage();
-              },
-              onPageChanged: (page, total) {
-                // ✨ ĐÃ SỬA CHẶN CỨNG LỖI OVER-SCROLL KHI VUỐT TAY TẠI TRANG CUỐI
-                if (page != null && mounted && _totalPages > 0) {
-                  if (page >= 0 && page < _totalPages) {
-                    setState(() {
-                      _currentPage = page;
-                    });
-                    if (!_isGuest) {
-                      _checkBookmarkStatus(); // Chạy cực kỳ an toàn vì đã có snapshot bảo vệ bên trong
-                    }
-                  }
-                }
-              },
-            ),
+            kIsWeb
+                ? buildWebPdfEmbed(_localPdfPath!, bookId: widget.bookId)
+                : PDFView(
+                    filePath: _localPdfPath!,
+                    onRender: (pages) {
+                      if (mounted) {
+                        setState(() {
+                          _totalPages = pages ?? 0;
+                          _isReady = true;
+                        });
+                        _safeJumpToInitialPage();
+                      }
+                    },
+                    onError: (error) {
+                      if (mounted) {
+                        setState(() {
+                          _errorMessage = error.toString();
+                        });
+                      }
+                    },
+                    onViewCreated: (pdfViewController) {
+                      _pdfViewController = pdfViewController;
+                      _safeJumpToInitialPage();
+                    },
+                    onPageChanged: (page, total) {
+                      // ✨ ĐÃ SỬA CHẶN CỨNG LỖI OVER-SCROLL KHI VUỐT TAY TẠI TRANG CUỐI
+                      if (page != null && mounted && _totalPages > 0) {
+                        if (page >= 0 && page < _totalPages) {
+                          setState(() {
+                            _currentPage = page;
+                          });
+                          _saveLocalProgress(page);
+                          if (!_isGuest) {
+                            _checkBookmarkStatus(); // Chạy cực kỳ an toàn vì đã có snapshot bảo vệ bên trong
+                          }
+                        }
+                      }
+                    },
+                  ),
           if (!_isReady && _errorMessage.isEmpty)
             const Center(child: CircularProgressIndicator(color: Colors.orange)),
           if (_errorMessage.isNotEmpty)
             Center(
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  "Không thể hiển thị tài liệu: $_errorMessage",
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.redAccent),
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.picture_as_pdf_outlined, color: Colors.orangeAccent, size: 48),
+                    const SizedBox(height: 12),
+                    Text(
+                      "Không thể hiển thị tài liệu: $_errorMessage",
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.pushReplacement(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ContentReaderScreen(
+                              bookId: widget.bookId,
+                              bookTitle: widget.bookTitle,
+                              username: widget.username,
+                            ),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.menu_book_rounded, color: Colors.orangeAccent),
+                      label: const Text("Chuyển sang chế độ đọc văn bản", style: TextStyle(color: Colors.white)),
+                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.orangeAccent)),
+                    ),
+                  ],
                 ),
               ),
             ),
         ],
       ),
-      bottomNavigationBar: _isReady && _totalPages > 0
+      bottomNavigationBar: (!kIsWeb && _isReady && _totalPages > 0)
           ? Container(
         height: 55,
         color: Colors.grey[900],

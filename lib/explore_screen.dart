@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:ui'; // Thư viện bắt buộc để xử lý hiệu ứng làm mờ ImageFilter
 import 'login_screen.dart';
 import 'book_shelf_screen.dart'; // Import sang Kệ sách để chuyển trang nhanh
+import 'api_config.dart';
 
 class ExploreScreen extends StatefulWidget {
   final String username;
@@ -87,7 +88,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
     if (!mounted) return;
     setState(() => _isBookLoading = true);
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/shop-books');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/shop-books');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -185,7 +186,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
       endpoint = 'pending';
     }
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/feed/$endpoint?current_user=${widget.username.trim()}');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/feed/$endpoint?current_user=${widget.username.trim()}');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -219,7 +220,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
       return;
     }
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/feed/posts');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/feed/posts');
     final request = http.MultipartRequest('POST', url);
     request.fields['username'] = widget.username.trim();
     request.fields['content'] = _postController.text.trim();
@@ -243,7 +244,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
   }
 
   Future<void> _approvePost(int postId) async {
-    final url = Uri.parse('http://10.0.2.2:8000/api/feed/posts/$postId/approve?username=${widget.username.trim()}');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/feed/posts/$postId/approve?username=${widget.username.trim()}');
     try {
       final response = await http.put(url);
       if (response.statusCode == 200) {
@@ -272,7 +273,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
 
     if (confirm != true) return;
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/feed/posts/$postId?username=${widget.username.trim()}');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/feed/posts/$postId?username=${widget.username.trim()}');
     try {
       final response = await http.delete(url);
       if (response.statusCode == 200) {
@@ -286,7 +287,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
 
   Future<void> _toggleLike(int postId) async {
     if (_checkGuestAndShowWarning()) return;
-    final url = Uri.parse('http://10.0.2.2:8000/api/feed/posts/$postId/like?username=${widget.username.trim()}');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/feed/posts/$postId/like?username=${widget.username.trim()}');
     try {
       final response = await http.post(url);
       if (response.statusCode == 200) _fetchFeed();
@@ -347,7 +348,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
                           icon: const Icon(Icons.send, color: Colors.orange),
                           onPressed: () async {
                             if (commentCtrl.text.trim().isEmpty) return;
-                            final url = Uri.parse('http://10.0.2.2:8000/api/feed/posts/$postId/comment?username=${widget.username.trim()}');
+                            final url = Uri.parse('${ApiConfig.baseUrl}/api/feed/posts/$postId/comment?username=${widget.username.trim()}');
                             final response = await http.post(url, body: {"content": commentCtrl.text.trim()});
                             if (response.statusCode == 200) {
                               final newComment = jsonDecode(utf8.decode(response.bodyBytes));
@@ -492,7 +493,7 @@ class _ExploreScreenState extends State<ExploreScreen> with TickerProviderStateM
                           itemBuilder: (context, index) {
                             final book = _latestBooks[index];
                             String rawImgUrl = book['image_path'] ?? book['image_url'] ?? '';
-                            String correctedImgUrl = rawImgUrl.replaceAll('localhost', '10.0.2.2');
+                            String correctedImgUrl = ApiConfig.formatUrl(rawImgUrl);
                             final double price = double.tryParse(book['price'].toString()) ?? 0.0;
 
                             return Container(

@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'api_config.dart';
 
 class AdminOrderScreen extends StatefulWidget {
   const AdminOrderScreen({super.key});
@@ -23,7 +24,7 @@ class _AdminOrderScreenState extends State<AdminOrderScreen> {
 
   Future<void> fetchOrders() async {
     // Sửa đường dẫn đồng bộ và truyền thêm query parameter ?current_user=admin
-    final url = Uri.parse('http://10.0.2.2:8000/api/orders/admin/all?current_user=admin');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/orders/admin/all?current_user=admin');
     try {
       setState(() {
         isLoading = true;
@@ -46,13 +47,13 @@ class _AdminOrderScreenState extends State<AdminOrderScreen> {
         isLoading = false;
         connectionError = "Không thể kết nối đến Backend Server!";
       });
-      print("Lỗi tải đơn hàng: $e");
+      debugPrint("Lỗi tải đơn hàng: $e");
     }
   }
 
   Future<void> updateStatus(int orderId, String newStatus) async {
     // Sửa đường dẫn update theo đúng main.py và truyền param xác thực
-    final url = Uri.parse('http://10.0.2.2:8000/api/orders/admin/status?current_user=admin');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/orders/admin/status?current_user=admin');
     try {
       final response = await http.put(
         url,
@@ -63,6 +64,7 @@ class _AdminOrderScreenState extends State<AdminOrderScreen> {
         }),
       );
 
+      if (!mounted) return;
       if (response.statusCode == 200) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Cập nhật trạng thái thành công!"), backgroundColor: Colors.green),
@@ -74,7 +76,7 @@ class _AdminOrderScreenState extends State<AdminOrderScreen> {
         );
       }
     } catch (e) {
-      print("Lỗi kết nối cập nhật trạng thái: $e");
+      debugPrint("Lỗi kết nối cập nhật trạng thái: $e");
     }
   }
 

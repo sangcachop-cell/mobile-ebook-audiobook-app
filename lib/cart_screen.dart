@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:ui';
+import 'api_config.dart';
 
 class CartScreen extends StatefulWidget {
   final String username;
@@ -99,7 +100,7 @@ class _CartScreenState extends State<CartScreen> {
 
     setState(() => _isSubmitting = true);
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/orders/checkout');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/orders/checkout');
 
     List<Map<String, dynamic>> itemsPayload = _localCart.map((item) {
       return {
@@ -138,12 +139,12 @@ class _CartScreenState extends State<CartScreen> {
           if (mounted) Navigator.pop(context);
         });
       } else {
-        print("Lỗi Backend trả về: ${response.body}");
+        debugPrint("Lỗi Backend trả về: ${response.body}");
         _showSnackBar("Giao dịch thất bại! Lỗi từ máy chủ.", Colors.redAccent);
       }
     } catch (e) {
       _showSnackBar("Không thể kết nối đến máy chủ thanh toán!", Colors.redAccent);
-      print("Lỗi Checkout: $e");
+      debugPrint("Lỗi Checkout: $e");
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -225,7 +226,7 @@ class _CartScreenState extends State<CartScreen> {
                   itemCount: _localCart.length,
                   itemBuilder: (context, index) {
                     final item = _localCart[index];
-                    String imgUrl = (item['image_path'] ?? '').toString().replaceAll('localhost', '10.0.2.2');
+                    String imgUrl = ApiConfig.formatUrl((item['image_path'] ?? '').toString());
                     double bookPrice = double.tryParse(item['price'].toString()) ?? 0.0;
 
                     return Container(

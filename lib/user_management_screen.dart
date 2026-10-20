@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:ui';
+import 'api_config.dart';
 
 class UserManagementScreen extends StatefulWidget {
   const UserManagementScreen({super.key});
@@ -26,7 +27,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
     if (!mounted) return;
     setState(() => _isLoading = true);
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/admin/users');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/admin/users');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -57,7 +58,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
       });
     }
 
-    final url = Uri.parse('http://10.0.2.2:8000/api/admin/users/$userId');
+    final url = Uri.parse('${ApiConfig.baseUrl}/api/admin/users/$userId');
     try {
       final response = await http.delete(url);
 
@@ -225,10 +226,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                   final bool isUserAdmin = user['is_admin'] ?? false;
 
                   // Xử lý đọc link avatar an toàn từ Server
-                  String avatarUrl = user['avatar_url'] ?? "";
-                  if (avatarUrl.contains('localhost')) {
-                    avatarUrl = avatarUrl.replaceAll('localhost', '10.0.2.2');
-                  }
+                  String avatarUrl = ApiConfig.formatUrl(user['avatar_url'] ?? "");
 
                   return Container(
                     key: userId != 0 ? ValueKey("manage_user_${userId}_$index") : UniqueKey(),
